@@ -58,7 +58,6 @@ void displayMessage(const char* message) {
   DispBuff.println(message);
 }
 
-unsigned long drawElapseTime;
 void drawWaveTask(void* arg) {
   while(1) {
     auto drawStartTime = millis();
@@ -77,7 +76,6 @@ void drawWaveTask(void* arg) {
     canvas.pushSprite(0, 0);
 
     DispBuff.endWrite();
-    drawElapseTime = millis() - drawStartTime;
 
     delay(sampleCount * 1000 / sample_rate);
   }
@@ -89,7 +87,7 @@ void playAudioTask(void* arg) {
       int bytesRead = audioFile.read((uint8_t*)samples, sizeof(samples));
       if (bytesRead > 0) {
           M5.Speaker.playRaw((int16_t*)samples, bytesRead / sizeof(int16_t), sample_rate);
-          while(M5.Speaker.isPlaying()) { delay(1); }
+          while(M5.Speaker.isPlaying());
       }
     }
     else {
