@@ -48,6 +48,7 @@ bool mountSDCard() {
 }
 
 void displayMessage(const char* message) {
+  //Serial.println(message);
   // ディスプレイをクリアし、メッセージを表示（UTF-8日本語対応）
   DispBuff.setFont(&fonts::lgfxJapanGothicP_20);  // 日本語フォントを使用
   DispBuff.fillRect(0, screenHeight - 40, screenWidth, 40, TFT_BLACK); // 下部を黒でクリア
@@ -57,24 +58,69 @@ void displayMessage(const char* message) {
   DispBuff.println(message);
 }
 
+unsigned long drawElapseTime;
+void drawWaveTask(void* arg) {
+  while(1) {
+    auto drawStartTime = millis();
+
+    DispBuff.startWrite();
+
+    canvas.createSprite(screenWidth, waveformHeight);
+    // 波形を描画
+    for (int i = 0; i < screenWidth - 1; i++) {
+      int y1 = map(samples[i], -32768, 32767, 0, waveformHeight);
+      int y2 = map(samples[i + 1], -32768, 32767, 0, waveformHeight);
+
+      // 波形を画面に描画
+      canvas.drawLine(i, y1, i + 1, y2, GREEN);
+    }
+    canvas.pushSprite(0, 0);
+
+    DispBuff.endWrite();
+    drawElapseTime = millis() - drawStartTime;
+
+    delay(sampleCount * 1000 / sample_rate);
+  }
+}
+
+void playAudioTask(void* arg) {
+  while(1) {
+    if(audioFile.available()) {
+      int bytesRead = audioFile.read((uint8_t*)samples, sizeof(samples));
+      if (bytesRead > 0) {
+          M5.Speaker.playRaw((int16_t*)samples, bytesRead / sizeof(int16_t), sample_rate);
+          while(M5.Speaker.isPlaying()) { delay(1); }
+      }
+    }
+    else {
+      M5.Speaker.end();
+      delay(100);
+      M5.Mic.begin();
+
+      displayMessage("[A] 録音開始 / 停止 ,  [B] 再生");
+      isPlaying = false;
+      vTaskDelete(NULL);
+    }
+    delay(1);
+  }
+}
+
 void setup() {
   auto cfg = M5.config();
-
-  //cfg.internal_mic = false;  // 内蔵マイクの使用を指定
-
+  cfg.internal_mic = true;  // 内蔵マイクの使用
   M5.begin(cfg);
 
-  Serial.begin();
+  //Serial.begin();
 
   auto mic_cfg = M5.Mic.config();
 
   if(!cfg.internal_mic){
     // PORT A for Core S3
-    mic_cfg.pin_ws = I2S_WS; 
+    mic_cfg.pin_ws      = I2S_WS; 
     mic_cfg.pin_data_in = I2S_DATA_IN;
   }
+
   mic_cfg.sample_rate = sample_rate;
-  
   mic_cfg.over_sampling = 2;
   mic_cfg.magnification = 16;
   mic_cfg.noise_filter_level = 0; // 1(弱)～3(強), 室内想定のため 0(負荷なし)
@@ -93,37 +139,18 @@ void setup() {
   // 初期画面設定
   DispBuff.begin();
   DispBuff.fillScreen(BLACK);
-  DispBuff.setFont(&fonts::lgfxJapanGothicP_20);  // 日本語フォントを使用
+  DispBuff.setFont(&fonts::lgfxJapanGothicP_20);  // 日本語フォント使用
   DispBuff.setTextSize(1);  // 日本語フォントに合わせてサイズ調整
 
-  // SDカードのマウント処理（GPIO10をCSピン、通信速度は25MHz）
+  // SDカードのマウント処理
   if (!mountSDCard()) {
     displayMessage("SDカードのマウントに失敗しました!");
     while (1);  // 失敗時は停止
   }
 
-  displayMessage("A: 録音開始 / 停止, B: 再生");
-}
+  displayMessage("[A] 録音開始 / 停止 ,  [B] 再生");
 
-unsigned long drawElapseTime;
-void drawWaveform() {
-  auto drawStartTime = millis();
-
-  DispBuff.startWrite();
-
-  canvas.createSprite(screenWidth, waveformHeight);
-  // 波形を描画
-  for (int i = 0; i < screenWidth - 1; i++) {
-    int y1 = map(samples[i]*1.5, -32768, 32767, 0, waveformHeight);    // サンプル値を画面のY座標にマッピング
-    int y2 = map(samples[i + 1]*1.5, -32768, 32767, 0, waveformHeight); // 次のサンプルのY座標
-
-    // 波形を画面に描画
-    canvas.drawLine(i, y1, i + 1, y2, GREEN);
-  }
-  canvas.pushSprite(0, 0);
-
-  DispBuff.endWrite();
-  drawElapseTime = millis() - drawStartTime;
+  xTaskCreatePinnedToCore(drawWaveTask, "drawWaveTask", 4096, NULL, 2, NULL, 1);
 }
 
 void loop() {
@@ -139,7 +166,7 @@ void loop() {
     int buttonB_X_End = 2 * (screenWidth / 3);
 
     if (t.x < buttonA_X_End) {
-      if (isPlaying) return; // 再生中時は、ボタンAを無視
+      if (isPlaying) return; // 再生中時はボタンAを無視
 
       // ボタンA: 録音開始または停止
       if (!isRecording) {
@@ -155,13 +182,13 @@ void loop() {
         }
       }
       else {
-        audioFile.close();
-        displayMessage("A: 録音開始 / 停止, B: 再生");
+        audioFile.close(); // 録音終了
+        displayMessage("[A] 録音開始 / 停止 ,  [B] 再生");
         isRecording = false;
       }
     }
     else if (t.x >= buttonB_X_Start && t.x < buttonB_X_End) {
-      if (isRecording) return; // 録音中時は、ボタンBを無視
+      if (isRecording) return; // 録音中時はボタンBを無視
       
       // ボタンB: 再生開始または停止
       if(!isPlaying) {
@@ -186,44 +213,18 @@ void loop() {
 
         displayMessage("再生中...");
         isPlaying = true;
+
+        xTaskCreatePinnedToCore(playAudioTask, "playAudioTask", 4096, NULL, 1, NULL, 0);
       }
       else
       {
+        // 再生中断
         audioFile.close();
-
-        M5.Speaker.end();
-        delay(100);
-        M5.Mic.begin();
-
-        displayMessage("A: 録音開始 / 停止, B: 再生");
-        isPlaying = false;
       }
     }
   }
 
-  if (isPlaying) {
-    if (audioFile.available()) {
-      // 再生
-      int bytesRead = audioFile.read((uint8_t*)samples, sizeof(samples));
-      if (bytesRead > 0) {
-        M5.Speaker.playRaw((int16_t*)samples, bytesRead / sizeof(int16_t), sample_rate);
-        delay((sampleCount * 1000 / sample_rate) - drawElapseTime);
-      }
-    }
-    else {
-      // 再生終了
-      audioFile.close();
-
-      M5.Speaker.end();
-      delay(100);
-      M5.Mic.begin();
-
-      displayMessage("A: 録音開始 / 停止, B: 再生");
-      isPlaying = false;
-    }
-  }
-  else
-  {
+  if (!isPlaying) {
     // 再生時以外は常に録音状態
     if(M5.Mic.record(samples, sampleCount, sample_rate)){
       // ファイル書き込み
@@ -233,5 +234,5 @@ void loop() {
     }
   }
 
-  drawWaveform();
+  delay(1);
 }
